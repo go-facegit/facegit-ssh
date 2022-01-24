@@ -3,10 +3,12 @@ package ssh
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/unknwon/com"
@@ -46,6 +48,14 @@ func cleanCommand(cmd string) string {
 		return cmd
 	}
 	return cmd[i:]
+}
+
+func parseSSHCmd(cmd string) (string, string) {
+	ss := strings.SplitN(cmd, " ", 2)
+	if len(ss) != 2 {
+		return "", ""
+	}
+	return ss[0], strings.Replace(ss[1], "'/", "'", 1)
 }
 
 func handleServerConn(keyID string, chans <-chan ssh.NewChannel) {
@@ -91,12 +101,12 @@ func handleServerConn(keyID string, chans <-chan ssh.NewChannel) {
 
 				case "exec":
 					cmdName := strings.TrimLeft(payload, "'()")
-					log.Printf("SSH: Payload: %v", cmdName)
+					verb, cmdArgs := parseSSHCmd(cmdName)
 
-					args := []string{"serv", "key-" + keyID, "--config=" + "/"}
-					log.Printf("SSH: Arguments: %v", args)
-					cmd := exec.Command("./", args...)
-					cmd.Env = append(os.Environ(), "SSH_ORIGINAL_COMMAND="+cmdName)
+					repoFullName := strings.ToLower(strings.Trim(cmdArgs, "'"))
+					repoPath := fmt.Sprintf("%s/%s", DefaultConfig.ProjectRoot, repoFullName)
+
+					cmd := exec.Command("git", verb[4:], repoPath)
 
 					stdout, err := cmd.StdoutPipe()
 					if err != nil {
@@ -190,16 +200,39 @@ func Listen(host string, port int, ciphers, macs []string) {
 		},
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 
+			content := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
 			fmt.Println(key)
-			fmt.Println(strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
+			fmt.Println(content)
 			// pkey, err := db.SearchPublicKeyByContent(strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
 			// if err != nil {
 			// 	log.Printf("SearchPublicKeyByContent: %v", err)
 			// 	return nil, err
 			// }
-			return &ssh.Permissions{Extensions: map[string]string{"key-id": com.ToStr(1)}}, nil
+			return &ssh.Permissions{Extensions: map[string]string{"key-id": "1"}}, nil
 		},
 	}
+
+	keyPath := filepath.Join("data", "ssh", "facegit.rsa")
+	if !com.IsExist(keyPath) {
+		if err := os.MkdirAll(filepath.Dir(keyPath), os.ModePerm); err != nil {
+			panic(err)
+		}
+		_, stderr, err := com.ExecCmd("ssh-keygen", "-f", keyPath, "-t", "rsa", "-m", "PEM", "-N", "")
+		if err != nil {
+			panic(fmt.Sprintf("Failed to generate private key: %v - %s", err, stderr))
+		}
+		log.Printf("SSH: New private key is generateed: %s", keyPath)
+	}
+
+	privateBytes, err := ioutil.ReadFile(keyPath)
+	if err != nil {
+		panic("SSH: Failed to load private key: " + err.Error())
+	}
+	private, err := ssh.ParsePrivateKey(privateBytes)
+	if err != nil {
+		panic("SSH: Failed to parse private key: " + err.Error())
+	}
+	config.AddHostKey(private)
 
 	fmt.Println("start ssh service")
 	portListen(config, host, port)
